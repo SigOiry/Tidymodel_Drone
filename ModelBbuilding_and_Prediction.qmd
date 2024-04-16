@@ -1,0 +1,141 @@
+---
+title: "Model Building and Prediction"
+author: "Simon Oiry"
+format: html
+editor: Source
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r library }
+library(tidyverse)
+library(tidymodels)
+library(sf)
+library(terra)
+library(vetiver)
+library(vip)
+library(pins)
+
+
+
+
+```
+
+```{r Data pre-processing}
+
+### Open the training/testing shapefile and keep only needed classes
+shp <- read_sf("Data/ROIAveiro.shp") %>% 
+  select(Class,geometry) %>% 
+  vect()
+
+### Opening the multispectral drone flight
+img <- rast("Data/Aveiro_MULTI_12m_ortho_1801.tif")
+
+
+shp_rast <- terra::rasterize(shp,img,field = "Class")
+
+stk <- rast(list(img, shp_rast)) %>% 
+  as.data.frame(xy=T) %>% 
+  set_names(c("x","y",paste0("B",c(1:10)),"Class"))%>% 
+  filter(!is.na(Class),
+         B1 != 65535)
+```
+
+```{r model_building}
+
+stk_noData <- stk %>% 
+  drop_na() %>% 
+  mutate(Class = as.factor(Class))
+
+splitdata<-initial_split(stk_noData)
+
+df_train<-splitdata %>% 
+  training()
+
+df_test<-splitdata %>% 
+  testing()
+
+set.seed(234)
+
+df_train_folds<-vfold_cv(df_train,strata = Class)
+
+df_train_folds
+
+Drone_recipe <- recipe(Class ~ ., data = df_train)%>% 
+  update_role(x, y, new_role = "ID") 
+
+Drone_juiced <- prep(Drone_recipe) %>% 
+  juice()
+
+
+tune_spec <- rand_forest(
+  mtry = tune(),
+  trees = 500,
+  min_n = tune()
+) %>%
+  set_mode("classification") %>%
+  set_engine("ranger")
+
+tune_wf <- workflow() %>%
+  add_recipe(Drone_recipe) %>%
+  add_model(tune_spec)
+
+
+set.seed(234)
+
+tune_res <- tune_grid(
+  tune_wf,
+  resamples = df_train_folds,
+  grid = 10
+)
+
+best_auc <- select_best(tune_res, metric = "roc_auc")
+
+final_rf <- finalize_model(
+  tune_spec,
+  best_auc
+)
+
+final_rf
+
+
+set.seed(234)
+
+final_rf %>%
+  set_engine("ranger", importance = "permutation") %>%
+  fit(Class~.,data=Drone_juiced
+  ) %>%
+  vip(geom = "point")+
+  theme_classic()
+
+final_wf <- workflow() %>%
+  add_recipe(Drone_recipe) %>%
+  add_model(final_rf)
+
+final_res <- final_wf %>%
+  last_fit(splitdata)
+
+final_res %>%
+  collect_metrics()
+
+v<-final_res %>% 
+   extract_workflow() %>% 
+   vetiver_model(model_name = "RF_model")
+
+saving_board<-board_folder(path="Output/Model/")
+vetiver_pin_write(saving_board,v)
+
+
+```
+
+
+```{r Prediction}
+
+stk <- rast(list(img)) %>% 
+  as.data.frame(xy=T) %>% 
+  set_names(c("x","y",paste0("B",c(1:10))))
+
+pred <- predict(v,stk,type = "class")
+
+```
+
