@@ -8,6 +8,7 @@ editor_options:
 ---
 
 ```{r library }
+
 library(tidyverse)
 library(tidymodels)
 library(sf)
@@ -15,9 +16,7 @@ library(terra)
 library(vetiver)
 library(vip)
 library(pins)
-
-
-
+library(flextable)
 
 ```
 
@@ -118,24 +117,160 @@ final_res <- final_wf %>%
 final_res %>%
   collect_metrics()
 
-v<-final_res %>% 
+RF_model<-final_res %>% 
    extract_workflow() %>% 
    vetiver_model(model_name = "RF_model")
 
 saving_board<-board_folder(path="Output/Model/")
-vetiver_pin_write(saving_board,v)
+vetiver_pin_write(saving_board,RF_model)
 
 
 ```
 
+```{r accuracy assessment and confusion matrix}
+#| cache: true
+#| echo: false
+#| warning: false
+#| eval: false
+
+ClassID <- "Data/ClassID.csv" %>% 
+  read.csv2() %>% 
+  mutate(ID = as.factor(ID)) %>% 
+  as_tibble()
+ 
+model_result<-as.tibble(df_test) %>%
+  dplyr::select(Class) %>% 
+  dplyr::rename(Truth = Class) %>%
+  bind_cols(RF_model %>% 
+                          predict(new_data = as.tibble(df_test))) %>% 
+  bind_cols(RF_model %>% 
+              predict(new_data = as.tibble(df_test), type = "prob")) %>%  
+  left_join(ClassID, by = c("Truth"="ID")) %>%
+  dplyr::select(-Truth) %>%
+  rename(Truth = Class) %>%
+  left_join(ClassID, by = c(".pred_class"="ID")) %>%
+  dplyr::select(-.pred_class) %>%
+  rename(.pred_class = Class) %>%
+  mutate(Truth = as.factor(Truth),.pred_class=as.factor(.pred_class))
+
+
+brdr <- fp_border_default(color = "black", width = 1.5)
+
+ClassID_row <- ClassID %>% 
+  mutate(ID_row = as.character(1:nrow(.)))
+
+conf_matrix<-model_result %>% 
+  conf_mat(Truth, .pred_class) %>% 
+    tidy() %>% 
+  separate(name,into = c("cell","row","col")) %>% 
+  left_join(ClassID_row, by = c("row"="ID_row")) %>%
+  dplyr::select(-row, -ID) %>%
+  rename(row = Class) %>%
+  left_join(ClassID_row, by = c("col"="ID_row")) %>%
+  dplyr::select(-col, -ID) %>%
+  rename(col = Class) %>% 
+  pivot_wider(names_from = "col", values_from = "value") %>% 
+  dplyr::select(-cell)
+
+conf_matrix<-cbind(rep("Prediction",nrow(conf_matrix)),conf_matrix) %>% 
+  rename(name = 'rep("Prediction", nrow(conf_matrix))')
+
+flextable(conf_matrix) %>%
+  # rotate(j=1,rotation="btlr") %>%
+  # merge_v(j = 1) %>% 
+  set_header_labels(name = "", row = " ") %>% 
+  add_header_row(values = rep("Truth",ncol(conf_matrix))) %>%
+  merge_h(part = "header") %>%
+    border_remove() %>% 
+    hline_top(j = 2:10,border=brdr) %>% 
+    vline(j=1,border=brdr) %>% 
+    align(align = "center",part = "all") %>% 
+  autofit()
+
+#  
+# model_result %>% 
+#   pivot_longer(-c(1:2),names_to="Class_pred",values_to = "Class_prob") %>%
+#   dplyr::filter(Class_prob>0) %>% 
+#   ggplot(aes(x=Class_pred,y=Class_prob,color=Truth))+
+#   geom_boxplot()+
+#   facet_wrap(~Truth)
+
+```
+
+
 
 ```{r Prediction}
 
+### Model Opening ####
+
+model_path<-"Output/Model"
+name<-gsub(".*/","",list.dirs(model_path,recursive = F))
+board<- board_folder(model_path)
+
+models<-model_path %>% 
+  list.files(pattern=".rds",recursive = T)
+
+if (length(models)==1) {
+  RF_model<-vetiver_pin_read(board,name = name)
+}else{
+ 
+  UseLast<- askYesNo(msg = paste0(length(models)," models has been found ! Do you want to use the last model ?"))
+  if (UseLast == FALSE) {
+    Pin = selectDirectory(caption="Select the version you want to use",path = paste0(model_path,"/",name))
+    Pin = gsub(".*/","",Pin)
+    RF_model<-vetiver_pin_read(board,name = name,version = Pin)
+  }else{
+    for (i in 1:length(models)) {
+      if (i==1) {
+       versions<-gsub(paste0("/","",gsub(".*/","",models[i])),"",models[i]) %>%
+        gsub(".*/","",.)
+       name_vec<-gsub(paste0("/","",gsub(".*/","",models[i])),"",models[i]) %>% 
+         gsub("/.*","",.)
+      }else{
+       versions[i]<-gsub(paste0("/","",gsub(".*/","",models[i])),"",models[i]) %>%
+        gsub(".*/","",.) 
+              name_vec[i]<-gsub(paste0("/","",gsub(".*/","",models[i])),"",models[i]) %>% 
+         gsub("/.*","",.)
+      }
+      
+    }
+    
+    df_version<-tibble(names = name_vec,
+                       version = versions,
+                       year = substr(versions,1,4),
+                       month = substr(versions,5,6),
+                       day = substr(versions,7,8),
+                       hour = substr(versions,10,11),
+                       min = substr(versions,12,13),
+                       sec = substr(versions,14,15))
+    df_version$date<-paste0(df_version$year,"/",df_version$month,"/",df_version$day," ",df_version$hour,":",df_version$min,":",df_version$sec)
+    
+    df_version$date<-strptime(df_version$date,"%Y/%m/%d %H:%M:%S")
+    for (i in 1:nrow(df_version)) {
+      df_version$timediff[i]<-difftime(Sys.time(),df_version$date[i],units = "secs")
+    }
+    Pin<-df_version %>% 
+      filter(timediff ==min(timediff)) %>% 
+      dplyr::select(names,version)
+     
+    RF_model<-vetiver_pin_read(board,name = Pin$names,version = Pin$version)
+  }
+ 
+ 
+}
+
+#####
+
 stk <- rast(list(img)) %>% 
   as.data.frame(xy=T) %>% 
-  set_names(c("x","y",paste0("B",c(1:10))))
+  set_names(c("x","y",paste0("B",c(1:10)))) %>% 
+  dplyr::filter(B1 != 65535)
 
-pred <- predict(v,stk,type = "class")
+slice <- stk %>% 
+  slice(1:10000)
+
+pred <- slice %>% 
+  mutate(pred = predict(RF_model,slice,type = "class"))
 
 ```
 
