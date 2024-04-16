@@ -197,8 +197,6 @@ flextable(conf_matrix) %>%
 
 ```
 
-
-
 ```{r Prediction}
 
 ### Model Opening ####
@@ -276,14 +274,9 @@ pred <- slice %>%
 
 rast_sf <- pred %>% 
   select(x,y,pred) %>% 
-  st_as_sf(coords = c("x", "y")) %>%
-  dplyr::group_by(pred) %>%
-   summarise(geometry = st_union(geometry))
+  rast(type="xyz", crs = "EPSG:4326")
 
- rf_raster_out<-stars::st_rasterize(rast_sf)
- st_crs(rf_raster_out)<-4326
- 
-  stars::write_stars(rf_raster_out,"Output/pred1.tif")
+writeRaster(rf_raster_out,"Output/pred1.tif")
 
 
 ```
